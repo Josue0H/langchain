@@ -602,8 +602,39 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
         :ok
     end
 
-    candidates
-    |> Enum.map(&do_process_response(model, &1, message_type))
+    results =
+      candidates
+      |> Enum.map(&do_process_response(model, &1, message_type))
+
+    # Separate successful message structs from errors
+    {oks, errs} =
+      Enum.split_with(results, fn r ->
+        match?(%Message{}, r) or match?(%MessageDelta{}, r)
+      end)
+
+    cond do
+      # Prefer returning any valid messages/deltas if present
+      oks != [] ->
+        oks
+
+      # If only errors were returned, surface the first as an error tuple
+      errs != [] ->
+        case List.first(errs) do
+          {:error, %LangChainError{} = e} -> {:error, e}
+          other ->
+            Logger.error("Unexpected non-error entry in error list: #{inspect(other)}")
+            {:error,
+             LangChainError.exception(
+               type: "unexpected_response",
+               message: "Unexpected response"
+             )}
+        end
+
+      true ->
+        # No valid results and no errors detected – treat as unexpected
+        {:error,
+         LangChainError.exception(type: "unexpected_response", message: "Unexpected response")}
+    end
   end
 
   # Function Call in a Message
@@ -650,6 +681,26 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:error, LangChainError.exception(changeset)}
+    end
+  end
+
+  # Handle candidate with only a finishReason and no content/parts
+  # For MALFORMED_FUNCTION_CALL, treat as an empty assistant message so the chain can continue.
+  def do_process_response(_model, %{"finishReason" => "MALFORMED_FUNCTION_CALL", "index" => index}, Message) do
+    Logger.warning("Gemini reported MALFORMED_FUNCTION_CALL without content; continuing")
+    case Message.new(%{role: "assistant", content: [], status: :complete, index: index}) do
+      {:ok, message} -> message
+      {:error, %Ecto.Changeset{} = changeset} -> {:error, LangChainError.exception(changeset)}
+    end
+  end
+
+  # Generic finishReason-only candidate
+  def do_process_response(_model, %{"finishReason" => finish, "index" => index} = _data, Message) do
+    status = finish_reason_to_status(finish)
+
+    case Message.new(%{role: "assistant", content: [], status: status, index: index}) do
+      {:ok, message} -> message
+      {:error, %Ecto.Changeset{} = changeset} -> {:error, LangChainError.exception(changeset)}
     end
   end
 

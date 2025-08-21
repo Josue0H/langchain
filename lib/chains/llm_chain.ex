@@ -725,6 +725,16 @@ defmodule LangChain.Chains.LLMChain do
 
     # handle and output response
     case module.call(use_llm, chain.messages, chain.tools) do
+      # Normalize odd success-wrapped error shapes sometimes returned by adapters
+      {:ok, [error: %LangChainError{} = reason]} ->
+        if chain.verbose, do: IO.inspect(reason, label: "ERROR (wrapped in ok list)")
+        Logger.error("Error during chat call (wrapped). Reason: #{inspect(reason)}")
+        {:error, chain, reason}
+
+      {:ok, {:error, %LangChainError{} = reason}} ->
+        if chain.verbose, do: IO.inspect(reason, label: "ERROR (wrapped in ok tuple)")
+        Logger.error("Error during chat call (wrapped tuple). Reason: #{inspect(reason)}")
+        {:error, chain, reason}
       {:ok, [%Message{} = message]} ->
         if chain.verbose, do: IO.inspect(message, label: "SINGLE MESSAGE RESPONSE")
         {:ok, process_message(chain, message)}
